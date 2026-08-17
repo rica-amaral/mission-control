@@ -972,7 +972,7 @@ async function callClaudeViaCli(
     let stdout = ''
     let stderr = ''
     let outputBytes = 0
-    const timeoutMs = 180_000
+    const timeoutMs = 600_000
     const timer = setTimeout(() => {
       proc.kill('SIGTERM')
       reject(new Error(`Claude CLI timed out after ${timeoutMs / 1000}s`))
