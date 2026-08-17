@@ -339,6 +339,16 @@ const TOOLS = [
     handler: async ({ id }) => api('GET', `/api/tasks/${id}`),
   },
   {
+    name: 'mc_list_projects',
+    description:
+      'List all projects: id, name, slug, ticket prefix, linked GitHub repo, and assigned agents. '
+      + 'Use this to map what the user calls a project to its numeric project_id and to its folder '
+      + 'name on disk (the slug matches the directory under MC_WORKSPACE_ROOT, which is what goes '
+      + 'in a task\'s metadata.dispatchCwd).',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => api('GET', '/api/projects'),
+  },
+  {
     name: 'mc_create_task',
     description: 'Create a new task',
     inputSchema: {
@@ -348,6 +358,18 @@ const TOOLS = [
         description: { type: 'string', description: 'Task description' },
         priority: { type: 'string', description: 'Priority: low, medium, high, critical' },
         assigned_to: { type: 'string', description: 'Agent name to assign to' },
+        project_id: { type: 'number', description: 'Project this task belongs to' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Task tags' },
+        due_date: { type: 'number', description: 'Due date as a unix timestamp' },
+        metadata: {
+          type: 'object',
+          description:
+            'Per-task overrides for CLI dispatch. Set dispatchCwd to the directory the '
+            + 'agent must run in, relative to MC_WORKSPACE_ROOT (e.g. "gestao-obra"). '
+            + 'Required for agents that are not dedicated to a single project — without '
+            + 'it the agent falls back to its own configured default. Also accepts '
+            + 'dispatchAllowedTools (array) and dispatchMaxBudgetUsd (number).',
+        },
       },
       required: ['title'],
     },
