@@ -16,6 +16,9 @@ import { parseJsonlTranscript, readSessionJsonl, type TranscriptMessage } from '
 import { syncTaskOutbound } from './github-sync-engine'
 import { classifyModelProvider, getDispatchModelId, getModelByAlias } from './models'
 import type Database from 'better-sqlite3'
+import { claudeCliTimeoutMs, codexCliTimeoutMs, maxDispatchRetries } from './dispatch-limits'
+
+
 
 const AGENT_DISPATCH_ACCEPT_TIMEOUT_MS = 60_000
 
@@ -972,7 +975,7 @@ async function callClaudeViaCli(
     let stdout = ''
     let stderr = ''
     let outputBytes = 0
-    const timeoutMs = 600_000
+    const timeoutMs = claudeCliTimeoutMs()
     const timer = setTimeout(() => {
       proc.kill('SIGTERM')
       reject(new Error(`Claude CLI timed out after ${timeoutMs / 1000}s`))
@@ -1191,7 +1194,7 @@ async function callCodexViaCli(
     })
     let stdout = ''
     let stderr = ''
-    const timeoutMs = 300_000
+    const timeoutMs = codexCliTimeoutMs()
     const timer = setTimeout(() => {
       proc.kill('SIGTERM')
       reject(new Error(`Codex CLI timed out after ${timeoutMs / 1000}s`))
@@ -1496,7 +1499,7 @@ export async function requeueStaleTasks(): Promise<{ ok: boolean; message: strin
   const db = getDatabase()
   const now = Math.floor(Date.now() / 1000)
   const staleThreshold = now - 10 * 60 // 10 minutes
-  const maxDispatchRetries = 5
+  const maxRetries = maxDispatchRetries()
 
   const staleTasks = db.prepare(`
     SELECT t.id, t.title, t.assigned_to, t.dispatch_attempts, t.workspace_id,
@@ -1532,7 +1535,7 @@ export async function requeueStaleTasks(): Promise<{ ok: boolean; message: strin
 
     const newAttempts = (task.dispatch_attempts ?? 0) + 1
 
-    if (newAttempts >= maxDispatchRetries) {
+    if (newAttempts >= maxRetries) {
       db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ? WHERE id = ? AND workspace_id = ?')
         .run('failed', `Task stuck in_progress ${newAttempts} times — agent "${task.assigned_to}" offline. Moved to failed.`, newAttempts, now, task.id, task.workspace_id)
 
@@ -1555,7 +1558,7 @@ export async function requeueStaleTasks(): Promise<{ ok: boolean; message: strin
       db.prepare(`
         INSERT INTO comments (task_id, author, content, created_at, workspace_id)
         VALUES (?, 'scheduler', ?, ?, ?)
-      `).run(task.id, `Task requeued (attempt ${newAttempts}/${maxDispatchRetries}): agent "${task.assigned_to}" went offline while task was in_progress.`, now, task.workspace_id)
+      `).run(task.id, `Task requeued (attempt ${newAttempts}/${maxRetries}): agent "${task.assigned_to}" went offline while task was in_progress.`, now, task.workspace_id)
 
       eventBus.broadcast('task.status_changed', {
         id: task.id,
@@ -1890,9 +1893,9 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
       const currentAttempts = (db.prepare('SELECT dispatch_attempts FROM tasks WHERE id = ? AND workspace_id = ?')
         .get(task.id, task.workspace_id) as { dispatch_attempts: number } | undefined)?.dispatch_attempts ?? 0
       const newAttempts = currentAttempts + 1
-      const maxDispatchRetries = 5
+      const maxRetries = maxDispatchRetries()
 
-      if (newAttempts >= maxDispatchRetries) {
+      if (newAttempts >= maxRetries) {
         const failureMessage = `Dispatch failed ${newAttempts} times. Last: ${errorMsg.substring(0, 5000)}`
         // Too many failures — move to failed
         db.prepare('UPDATE tasks SET status = ?, error_message = ?, dispatch_attempts = ?, updated_at = ? WHERE id = ? AND workspace_id = ?')
