@@ -1583,6 +1583,54 @@ export async function requeueStaleTasks(): Promise<{ ok: boolean; message: strin
   }
 }
 
+/**
+ * O agente pode trabalhar neste projeto?
+ *
+ * `project_agent_assignments` existia desde sempre e **ninguem a lia no despacho** — so a tela
+ * de projetos. Associar um agente a um projeto era rotulo: nada impedia o agente do Instagram
+ * da Trievo de receber uma tarefa do gestao-obra.
+ *
+ * A regra tem duas metades, e a segunda e o que mantem isto seguro de ligar:
+ *
+ * - Agente **com** associacao so aceita tarefa dos projetos aos quais pertence.
+ * - Agente **sem** associacao nenhuma aceita de qualquer projeto. E o caso dos 7 agentes de
+ *   frota (dev, qa, analista...), que atuam em qualquer projeto de proposito. Bloquea-los
+ *   pararia a operacao inteira no dia em que isto subisse.
+ *
+ * Ou seja: escopo e opt-in. Associar um agente a um projeto passa a SIGNIFICAR alguma coisa,
+ * e nao associar mantem o comportamento de hoje.
+ */
+export function agentProjectScopeViolation(
+  db: any,
+  agentName: string,
+  projectId: number | null,
+  workspaceId: number,
+): string | null {
+  const escopos = db
+    .prepare('SELECT project_id FROM project_agent_assignments WHERE agent_name = ?')
+    .all(agentName) as { project_id: number }[]
+
+  if (escopos.length === 0) return null // sem escopo declarado: trabalha em qualquer projeto
+
+  const permitidos = escopos.map((e) => e.project_id)
+  if (projectId !== null && projectId !== undefined && permitidos.includes(projectId)) return null
+
+  const nomes = db
+    .prepare(
+      `SELECT name FROM projects WHERE id IN (${permitidos.map(() => '?').join(',')}) AND workspace_id = ?`,
+    )
+    .all(...permitidos, workspaceId)
+    .map((r: { name: string }) => r.name)
+    .join(', ')
+
+  const doProjeto =
+    projectId === null || projectId === undefined
+      ? 'uma tarefa sem projeto'
+      : `uma tarefa do projeto ${projectId}`
+
+  return `O agente ${agentName} atende so ${nomes}, e recebeu ${doProjeto}. Reatribua a um agente desse projeto, ou associe ${agentName} a ele.`
+}
+
 export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: string }> {
   const db = getDatabase()
 
@@ -1618,6 +1666,25 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
   const now = Math.floor(Date.now() / 1000)
 
   for (const task of tasks) {
+    // Escopo de projeto, ANTES do claim: tarefa recusada nao pode virar `in_progress` e ficar
+    // presa. Marca `failed` com o motivo em vez de so pular — pular deixaria o despachante
+    // reencontrar a mesma tarefa a cada tick, para sempre, sem ninguem ficar sabendo.
+    const violacao = agentProjectScopeViolation(db, task.agent_name, task.project_id ?? null, task.workspace_id)
+    if (violacao) {
+      db.prepare("UPDATE tasks SET status = 'failed', error_message = ?, updated_at = ? WHERE id = ? AND status = 'assigned' AND workspace_id = ?")
+        .run(violacao, now, task.id, task.workspace_id)
+      db_helpers.logActivity(
+        'task_scope_rejected', 'task', task.id, 'scheduler', violacao,
+        { agent: task.agent_name, project_id: task.project_id ?? null }, task.workspace_id,
+      )
+      eventBus.broadcast('task.status_changed', {
+        id: task.id, status: 'failed', previous_status: 'assigned', workspace_id: task.workspace_id,
+      })
+      logger.warn({ taskId: task.id, agent: task.agent_name, projectId: task.project_id }, 'Escopo de projeto: despacho recusado')
+      results.push({ id: task.id, success: false, error: violacao })
+      continue
+    }
+
     // Atomically claim the task: only flip to in_progress if it is still
     // 'assigned'. If two dispatchers race (e.g. concurrent scheduler ticks or
     // multiple workers polling), exactly one UPDATE reports changes=1 and the
